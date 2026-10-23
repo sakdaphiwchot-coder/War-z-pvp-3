@@ -1,0 +1,152 @@
+-- ======================================================================
+-- Jackwinler Hub 🪷 (Cyber Tokyo 2-Column Edition + Health & Distance ESP)
+-- ======================================================================
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local LocalPlayer = Players.LocalPlayer
+local Camera = workspace.CurrentCamera
+
+-- Config ทั้งหมด
+_G.AimbotEnabled = false
+_G.AimPart = "Head" 
+_G.Smoothness = 6 
+_G.ESPEnabled = false
+_G.EnemyHealthBarEnabled = false -- เปิด/ปิดหลอดเลือดและระยะห่างศัตรู
+_G.FOVEnabled = true
+_G.FOVRadius = 140 
+
+-- Config Auto Heal (ระบบใหม่ที่ปรับปรุงแล้ว)
+local AutoHealConfig = {
+    Enabled   = false,
+    Item      = "BandagesDX", -- ชื่อไอเทมยา
+    Threshold = 0.74,         -- ปั๊มเมื่อเลือด <= 74%
+    Cooldown  = 0.50,         -- คูลดาวน์ (วินาที)
+}
+
+-- ----------------------------------------------------------------------
+-- 1. BACKEND: ระบบปั๊มยาอัตโนมัติ
+-- ----------------------------------------------------------------------
+local remoteCache = nil
+local function GetUseItemRemote()
+    if remoteCache and remoteCache.Parent then return remoteCache end
+    remoteCache = nil
+    local remotes = ReplicatedStorage:FindFirstChild("Remotes")
+    local r = remotes and remotes:FindFirstChild("UseItem")
+    if not r then
+        for _, d in ipairs(ReplicatedStorage:GetDescendants()) do
+            if d.Name == "UseItem" and (d:IsA("RemoteEvent") or d:IsA("RemoteFunction")) then
+                r = d
+                break
+            end
+        end
+    end
+    remoteCache = r
+    return r
+end
+
+local function UseItem(itemName)
+    local remote = GetUseItemRemote()
+    if not remote then return end
+    pcall(function()
+        if remote:IsA("RemoteFunction") then
+            remote:InvokeServer(3, itemName, nil, nil, true)
+        else
+            remote:FireServer(3, itemName, nil, nil, true)
+        end
+    end)
+end
+
+local lastHealTime = 0
+local isProcessing = false
+
+local function TryHeal()
+    if not AutoHealConfig.Enabled or isProcessing then return end
+    local char = LocalPlayer.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    
+    if not hum or hum.Health <= 0 then return end
+    if (hum.Health / hum.MaxHealth) > AutoHealConfig.Threshold then return end
+    if (os.clock() - lastHealTime) < AutoHealConfig.Cooldown then return end
+
+    isProcessing = true
+    lastHealTime = os.clock()
+    
+    task.spawn(function()
+        UseItem(AutoHealConfig.Item)
+        task.wait(0.1)
+        isProcessing = false
+    end)
+end
+
+-- ลูปเช็คเลือด
+task.spawn(function()
+    while true do
+        if AutoHealConfig.Enabled then
+            TryHeal()
+        end
+        task.wait(0.25)
+    end
+end)
+
+-- ดักจับตอนโดนยิงเลือดลด
+local function watchCharacter(char)
+    local hum = char:WaitForChild("Humanoid", 5)
+    if hum then
+        hum.HealthChanged:Connect(function()
+            TryHeal()
+        end)
+    end
+end
+LocalPlayer.CharacterAdded:Connect(watchCharacter)
+if LocalPlayer.Character then
+    task.spawn(watchCharacter, LocalPlayer.Character)
+end
+
+-- FOV Circle
+local fovCircle = Drawing.new("Circle")
+fovCircle.Visible = _G.FOVEnabled
+fovCircle.Radius = _G.FOVRadius
+fovCircle.Color = Color3.fromRGB(255, 110, 180)
+fovCircle.Thickness = 1.5
+fovCircle.Filled = false
+fovCircle.Position = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
+
+-- ----------------------------------------------------------------------
+-- 2. ENEMY HEALTH BAR & DISTANCE ESP (หลอดเลือด + % + ระยะห่าง)
+-- ----------------------------------------------------------------------
+local healthBars = {}
+
+local function removeHealthBar(player)
+    if healthBars[player] then
+        for _, drawing in pairs(healthBars[player]) do
+            drawing:Remove()
+        end
+        healthBars[player] = nil
+    end
+end
+
+RunService.RenderStepped:Connect(function()
+    if not _G.EnemyHealthBarEnabled then
+        for player, _ in pairs(healthBars) do
+            removeHealthBar(player)
+        end
+        return
+    end
+
+    local localChar = LocalPlayer.Character
+    local localRoot = localChar and localChar:FindFirstChild("HumanoidRootPart")
+
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer and player.Character and player.Character:FindFirstChild("HumanoidRootPart") and player.Character:FindFirstChildOfClass("Humanoid") then
+            local char = player.Character
+            local hum = char:FindFirstChildOfClass("Humanoid")
+            local rootPart = char.FindFirstChild(char, "HumanoidRootPart")
+
+            if hum.Health > 0 and localRoot then
+                local vector, onScreen = Camera:WorldToViewportPoint(rootPart.Position + Vector3.new(0, 2.5, 0))
+                
+                if onScreen then
+                    if not healthBars[player] then
+          
