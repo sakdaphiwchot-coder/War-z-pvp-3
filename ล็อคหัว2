@@ -1,0 +1,357 @@
+-- ======================================================================
+-- Jackwinler Hub 🪷 (Cyber Tokyo 2-Column Edition + Health & Distance ESP)
+-- ======================================================================
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local LocalPlayer = Players.LocalPlayer
+local Camera = workspace.CurrentCamera
+
+-- Config ทั้งหมด
+_G.AimbotEnabled = false
+_G.AimPart = "Head" 
+_G.Smoothness = 6 
+_G.ESPEnabled = false
+_G.EnemyHealthBarEnabled = false -- เปิด/ปิดหลอดเลือดและระยะห่างศัตรู
+_G.FOVEnabled = true
+_G.FOVRadius = 140 
+
+-- Config Auto Heal (ระบบใหม่ที่ปรับปรุงแล้ว)
+local AutoHealConfig = {
+    Enabled   = false,
+    Item      = "BandagesDX", -- ชื่อไอเทมยา
+    Threshold = 0.74,         -- ปั๊มเมื่อเลือด <= 74%
+    Cooldown  = 0.50,         -- คูลดาวน์ (วินาที)
+}
+
+-- ----------------------------------------------------------------------
+-- 1. BACKEND: ระบบปั๊มยาอัตโนมัติ
+-- ----------------------------------------------------------------------
+local remoteCache = nil
+local function GetUseItemRemote()
+    if remoteCache and remoteCache.Parent then return remoteCache end
+    remoteCache = nil
+    local remotes = ReplicatedStorage:FindFirstChild("Remotes")
+    local r = remotes and remotes:FindFirstChild("UseItem")
+    if not r then
+        for _, d in ipairs(ReplicatedStorage:GetDescendants()) do
+            if d.Name == "UseItem" and (d:IsA("RemoteEvent") or d:IsA("RemoteFunction")) then
+                r = d
+                break
+            end
+        end
+    end
+    remoteCache = r
+    return r
+end
+
+local function UseItem(itemName)
+    local remote = GetUseItemRemote()
+    if not remote then return end
+    pcall(function()
+        if remote:IsA("RemoteFunction") then
+            remote:InvokeServer(3, itemName, nil, nil, true)
+        else
+            remote:FireServer(3, itemName, nil, nil, true)
+        end
+    end)
+end
+
+local lastHealTime = 0
+local isProcessing = false
+
+local function TryHeal()
+    if not AutoHealConfig.Enabled or isProcessing then return end
+    local char = LocalPlayer.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    
+    if not hum or hum.Health <= 0 then return end
+    if (hum.Health / hum.MaxHealth) > AutoHealConfig.Threshold then return end
+    if (os.clock() - lastHealTime) < AutoHealConfig.Cooldown then return end
+
+    isProcessing = true
+    lastHealTime = os.clock()
+    
+    task.spawn(function()
+        UseItem(AutoHealConfig.Item)
+        task.wait(0.1)
+        isProcessing = false
+    end)
+end
+
+-- ลูปเช็คเลือด
+task.spawn(function()
+    while true do
+        if AutoHealConfig.Enabled then
+            TryHeal()
+        end
+        task.wait(0.25)
+    end
+end)
+
+-- ดักจับตอนโดนยิงเลือดลด
+local function watchCharacter(char)
+    local hum = char:WaitForChild("Humanoid", 5)
+    if hum then
+        hum.HealthChanged:Connect(function()
+            TryHeal()
+        end)
+    end
+end
+LocalPlayer.CharacterAdded:Connect(watchCharacter)
+if LocalPlayer.Character then
+    task.spawn(watchCharacter, LocalPlayer.Character)
+end
+
+-- FOV Circle
+local fovCircle = Drawing.new("Circle")
+fovCircle.Visible = _G.FOVEnabled
+fovCircle.Radius = _G.FOVRadius
+fovCircle.Color = Color3.fromRGB(255, 110, 180)
+fovCircle.Thickness = 1.5
+fovCircle.Filled = false
+fovCircle.Position = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
+
+-- ----------------------------------------------------------------------
+-- 2. ENEMY HEALTH BAR & DISTANCE ESP (หลอดเลือด + % + ระยะห่าง)
+-- ----------------------------------------------------------------------
+local healthBars = {}
+
+local function removeHealthBar(player)
+    if healthBars[player] then
+        for _, drawing in pairs(healthBars[player]) do
+            drawing:Remove()
+        end
+        healthBars[player] = nil
+    end
+end
+
+RunService.RenderStepped:Connect(function()
+    if not _G.EnemyHealthBarEnabled then
+        for player, _ in pairs(healthBars) do
+            removeHealthBar(player)
+        end
+        return
+    end
+
+    local localChar = LocalPlayer.Character
+    local localRoot = localChar and localChar:FindFirstChild("HumanoidRootPart")
+
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer and player.Character and player.Character:FindFirstChild("HumanoidRootPart") and player.Character:FindFirstChildOfClass("Humanoid") then
+            local char = player.Character
+            local hum = char:FindFirstChildOfClass("Humanoid")
+            local rootPart = char.FindFirstChild(char, "HumanoidRootPart")
+
+            if hum.Health > 0 and localRoot then
+                local vector, onScreen = Camera:WorldToViewportPoint(rootPart.Position + Vector3.new(0, 2.5, 0))
+                
+                if onScreen then
+                    if not healthBars[player] then
+                        local bgBar = Drawing.new("Square")
+                        bgBar.Size = Vector2.new(46, 6)
+                        bgBar.Color = Color3.fromRGB(20, 15, 25)
+                        bgBar.Filled = true
+                        bgBar.Visible = false
+
+                        local innerBar = Drawing.new("Square")
+                        innerBar.Size = Vector2.new(42, 2)
+                        innerBar.Color = Color3.fromRGB(255, 105, 180) -- สีชมพูนีออนซากุระ
+                        innerBar.Filled = true
+                        innerBar.Visible = false
+
+                        local text = Drawing.new("Text")
+                        text.Size = 11
+                        text.Center = true
+                        text.Outline = true
+                        text.Color = Color3.fromRGB(255, 255, 255)
+                        text.Font = Drawing.Fonts.UI
+                        text.Visible = false
+
+                        local distText = Drawing.new("Text")
+                        distText.Size = 10
+                        distText.Center = true
+                        distText.Outline = true
+                        distText.Color = Color3.fromRGB(220, 180, 240) -- สีม่วงอ่อนสบายตา
+                        distText.Font = Drawing.Fonts.UI
+                        distText.Visible = false
+
+                        healthBars[player] = {bg = bgBar, inner = innerBar, txt = text, dist = distText}
+                    end
+
+                    local bars = healthBars[player]
+                    local healthPercent = math.clamp(hum.Health / hum.MaxHealth, 0, 1)
+                    local distance = math.floor((rootPart.Position - localRoot.Position).Magnitude)
+
+                    bars.bg.Position = Vector2.new(vector.X - 23, vector.Y - 10)
+                    bars.bg.Visible = true
+
+                    bars.inner.Position = Vector2.new(vector.X - 21, vector.Y - 8)
+                    bars.inner.Size = Vector2.new(42 * healthPercent, 2)
+                    bars.inner.Visible = true
+
+                    bars.txt.Text = math.floor(healthPercent * 100) .. "%"
+                    bars.txt.Position = Vector2.new(vector.X, vector.Y - 26)
+                    bars.txt.Visible = true
+
+                    bars.dist.Text = "[" .. distance .. "m]"
+                    bars.dist.Position = Vector2.new(vector.X, vector.Y + 4)
+                    bars.dist.Visible = true
+                else
+                    if healthBars[player] then
+                        healthBars[player].bg.Visible = false
+                        healthBars[player].inner.Visible = false
+                        healthBars[player].txt.Visible = false
+                        healthBars[player].dist.Visible = false
+                    end
+                end
+            else
+                removeHealthBar(player)
+            end
+        else
+            removeHealthBar(player)
+        end
+    end
+end)
+
+Players.PlayerRemoving:Connect(function(player)
+    removeHealthBar(player)
+end)
+
+-- ----------------------------------------------------------------------
+-- 3. UI: สร้างหน้าต่าง Cyber Tokyo 2-Column
+-- ----------------------------------------------------------------------
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "JackwinlerTokyoHub"
+ScreenGui.Parent = game:GetService("CoreGui")
+
+-- ปุ่มเปิด/ปิดเมนู
+local ToggleButton = Instance.new("TextButton")
+ToggleButton.Parent = ScreenGui
+ToggleButton.BackgroundColor3 = Color3.fromRGB(20, 15, 25)
+ToggleButton.Position = UDim2.new(0.04, 0, 0.35, 0)
+ToggleButton.Size = UDim2.new(0, 58, 0, 58)
+ToggleButton.Font = Enum.Font.GothamBold
+ToggleButton.Text = "🌸"
+ToggleButton.TextColor3 = Color3.fromRGB(255, 150, 200)
+ToggleButton.TextSize = 22
+ToggleButton.Draggable = true
+
+local ToggleCorner = Instance.new("UICorner", ToggleButton)
+ToggleCorner.CornerRadius = UDim.new(1, 0)
+local ToggleStroke = Instance.new("UIStroke", ToggleButton)
+ToggleStroke.Color = Color3.fromRGB(255, 105, 180)
+ToggleStroke.Thickness = 2.5
+
+-- หน้าต่างหลัก
+local MainFrame = Instance.new("Frame")
+MainFrame.Parent = ScreenGui
+MainFrame.BackgroundColor3 = Color3.fromRGB(15, 12, 20)
+MainFrame.Position = UDim2.new(0.12, 0, 0.22, 0)
+MainFrame.Size = UDim2.new(0, 420, 0, 240)
+MainFrame.Visible = false
+MainFrame.Active = true
+MainFrame.Draggable = true
+
+local MainCorner = Instance.new("UICorner", MainFrame)
+MainCorner.CornerRadius = UDim.new(0, 14)
+local MainStroke = Instance.new("UIStroke", MainFrame)
+MainStroke.Color = Color3.fromRGB(255, 110, 180)
+MainStroke.Thickness = 2
+
+-- แถบหัวข้อ
+local TitleLabel = Instance.new("TextLabel", MainFrame)
+TitleLabel.BackgroundColor3 = Color3.fromRGB(25, 18, 32)
+TitleLabel.Size = UDim2.new(1, 0, 0, 38)
+TitleLabel.Font = Enum.Font.GothamBold
+TitleLabel.Text = "  🌸  JACKWINLER HUB [TOKYO EDITION]  🪷"
+TitleLabel.TextColor3 = Color3.fromRGB(255, 180, 220)
+TitleLabel.TextSize = 13
+TitleLabel.TextXAlignment = Enum.TextXAlignment.Left
+
+local TitleCorner = Instance.new("UICorner", TitleLabel)
+TitleCorner.CornerRadius = UDim.new(0, 14)
+
+-- ปุ่มปิด (X)
+local CloseBtn = Instance.new("TextButton", MainFrame)
+CloseBtn.BackgroundColor3 = Color3.fromRGB(255, 60, 90)
+CloseBtn.Position = UDim2.new(1, -32, 0, 6)
+CloseBtn.Size = UDim2.new(0, 26, 0, 26)
+CloseBtn.Font = Enum.Font.GothamBold
+CloseBtn.Text = "×"
+CloseBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+CloseBtn.TextSize = 16
+local CloseCorner = Instance.new("UICorner", CloseBtn)
+CloseCorner.CornerRadius = UDim.new(1, 0)
+
+CloseBtn.MouseButton1Click:Connect(function() MainFrame.Visible = false end)
+ToggleButton.MouseButton1Click:Connect(function() MainFrame.Visible = not MainFrame.Visible end)
+
+-- คอลัมน์ซ้าย / ขวา
+local LeftColumn = Instance.new("Frame", MainFrame)
+LeftColumn.BackgroundTransparency = 1
+LeftColumn.Position = UDim2.new(0.03, 0, 0.22, 0)
+LeftColumn.Size = UDim2.new(0.46, 0, 0.74, 0)
+local LeftLayout = Instance.new("UIListLayout", LeftColumn)
+LeftLayout.SortOrder = Enum.SortOrder.LayoutOrder
+LeftLayout.Padding = UDim.new(0, 8)
+
+local RightColumn = Instance.new("Frame", MainFrame)
+RightColumn.BackgroundTransparency = 1
+RightColumn.Position = UDim2.new(0.51, 0, 0.22, 0)
+RightColumn.Size = UDim2.new(0.46, 0, 0.74, 0)
+local RightLayout = Instance.new("UIListLayout", RightColumn)
+RightLayout.SortOrder = Enum.SortOrder.LayoutOrder
+RightLayout.Padding = UDim.new(0, 8)
+
+-- ฟังก์ชันสร้างปุ่ม Toggle
+local function createToggle(parent, name, defaultState, callback)
+    local btn = Instance.new("TextButton", parent)
+    local state = defaultState
+    btn.BackgroundColor3 = state and Color3.fromRGB(160, 50, 110) or Color3.fromRGB(25, 20, 32)
+    btn.Size = UDim2.new(1, 0, 0, 36)
+    btn.Font = Enum.Font.GothamSemibold
+    btn.Text = name
+    btn.TextColor3 = state and Color3.fromRGB(255, 255, 255) or Color3.fromRGB(180, 170, 190)
+    btn.TextSize = 11
+    
+    local btnCorner = Instance.new("UICorner", btn)
+    btnCorner.CornerRadius = UDim.new(0, 8)
+    
+    btn.MouseButton1Click:Connect(function()
+        state = not state
+        btn.BackgroundColor3 = state and Color3.fromRGB(160, 50, 110) or Color3.fromRGB(25, 20, 32)
+        btn.TextColor3 = state and Color3.fromRGB(255, 255, 255) or Color3.fromRGB(180, 170, 190)
+        callback(state)
+    end)
+end
+
+-- ----------------------------------------------------------------------
+-- 4. สร้างปุ่มฟังก์ชันทั้งหมดลงใน 2 คอลัมน์
+-- ----------------------------------------------------------------------
+
+-- คอลัมน์ซ้าย (Aimbot & Visuals)
+createToggle(LeftColumn, "🎯 Aimbot", _G.AimbotEnabled, function(state)
+    _G.AimbotEnabled = state
+end)
+
+createToggle(LeftColumn, "👁️ ESP Player", _G.ESPEnabled, function(state)
+    _G.ESPEnabled = state
+end)
+
+createToggle(LeftColumn, "💖 Enemy Health + Dist", _G.EnemyHealthBarEnabled, function(state)
+    _G.EnemyHealthBarEnabled = state
+end)
+
+createToggle(LeftColumn, "⭕ FOV Circle", _G.FOVEnabled, function(state)
+    _G.FOVEnabled = state
+    fovCircle.Visible = state
+end)
+
+-- คอลัมน์ขวา (Combat & Auto Heal)
+createToggle(RightColumn, "🌸 Auto Heal", AutoHealConfig.Enabled, function(state)
+    AutoHealConfig.Enabled = state
+end)
+
+print("Jackwinler Hub [Tokyo Edition] Loaded Successfully with Health & Distance ESP!")
